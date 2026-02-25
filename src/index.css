@@ -1,0 +1,32 @@
+@import "tailwindcss";
+
+/* Custom grade colours */
+@theme {
+  --color-grade-not-started: #6B7280;
+  --color-grade-learning: #F59E0B;
+  --color-grade-practicing: #3B82F6;
+  --color-grade-confident: #10B981;
+  --color-grade-mastered: #8B5CF6;
+  --color-manager-accent: #14B8A6;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  font-family: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  background-color: #f8fafc;
+  color: #1e293b;
+}
+
+#root {
+  min-height: 100vh;
+}
+
+/* Print styles for Progress Report */
+@media print {
+  body { background: white !important; }
+  aside { display: none !important; }
+  main { margin: 0 !important; padding: 0 !important; }
+  table { font-size: 10px; }
+  th, td { padding: 4px 6px !important; }
+}

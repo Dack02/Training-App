@@ -3,22 +3,19 @@ import {
   Award,
   Filter,
   Printer,
-  ChevronDown,
   FileText,
 } from 'lucide-react';
-import storage from '../utils/storage';
+import {
+  fetchAllProgressForDoc,
+  fetchAllSignoffsForDoc,
+  progressArrayToMap,
+  signoffArrayToMap,
+} from '../lib/api';
 import { GRADES, getGrade, isCompleted } from '../utils/grades';
 
-/**
- * Progress Report — manager view showing a table of processes (rows) × trainees (columns).
- * Each cell shows grade colour + signed-off indicator.
- * Supports filtering by document, group, status, and trainee.
- * Includes CSS print styles.
- */
 export default function ProgressReport({ documents, users, currentUser }) {
   const trainees = users.filter((u) => u.role === 'trainee');
 
-  // Filters
   const [selectedDocId, setSelectedDocId] = useState(documents[0]?.id || '');
   const [selectedGroupId, setSelectedGroupId] = useState('all');
   const [selectedStatus, setSelectedStatus] = useState('all');
@@ -27,40 +24,58 @@ export default function ProgressReport({ documents, users, currentUser }) {
 
   const selectedDoc = documents.find((d) => d.id === selectedDocId);
 
-  // Load all progress and signoff data for selected document
+  // { progress: { [userId]: { [processId]: {...} } }, signoffs: { [userId]: { [processId]: {...} } } }
   const [data, setData] = useState({ progress: {}, signoffs: {} });
 
   useEffect(() => {
     if (!selectedDocId) return;
-    const progress = {};
-    const signoffs = {};
-    for (const trainee of trainees) {
-      progress[trainee.id] = storage.get(`progress:${selectedDocId}:${trainee.id}`) || { processes: {} };
-      const raw = storage.get(`signoffs:${selectedDocId}:${trainee.id}`) || [];
-      const activeMap = {};
-      for (const s of raw) {
-        if (s.revokedAt) delete activeMap[s.processId];
-        else activeMap[s.processId] = s;
+    let cancelled = false;
+
+    async function load() {
+      const [allProgress, allSignoffs] = await Promise.all([
+        fetchAllProgressForDoc(selectedDocId),
+        fetchAllSignoffsForDoc(selectedDocId),
+      ]);
+      if (cancelled) return;
+
+      // Group progress by user
+      const progressByUser = {};
+      for (const row of allProgress) {
+        if (!progressByUser[row.user_id]) progressByUser[row.user_id] = [];
+        progressByUser[row.user_id].push(row);
       }
-      signoffs[trainee.id] = activeMap;
+
+      // Group signoffs by user
+      const signoffsByUser = {};
+      for (const row of allSignoffs) {
+        if (!signoffsByUser[row.user_id]) signoffsByUser[row.user_id] = [];
+        signoffsByUser[row.user_id].push(row);
+      }
+
+      const progress = {};
+      const signoffs = {};
+      for (const trainee of trainees) {
+        progress[trainee.id] = progressArrayToMap(progressByUser[trainee.id] || []);
+        signoffs[trainee.id] = signoffArrayToMap(signoffsByUser[trainee.id] || []);
+      }
+
+      setData({ progress, signoffs });
     }
-    setData({ progress, signoffs });
+    load();
+    return () => { cancelled = true; };
   }, [selectedDocId, trainees.length]);
 
-  // Build filtered process list
   const groups = selectedDoc?.groups || [];
   const filteredGroups = useMemo(() => {
     if (selectedGroupId === 'all') return groups;
     return groups.filter((g) => g.id === selectedGroupId);
   }, [groups, selectedGroupId]);
 
-  // Visible trainees
   const visibleTrainees = trainees.filter((t) => selectedTraineeIds.has(t.id));
 
-  // Status filter helper
   function matchesStatus(processId, traineeId) {
     if (selectedStatus === 'all') return true;
-    const grade = data.progress[traineeId]?.processes?.[processId]?.grade || 'not_started';
+    const grade = data.progress[traineeId]?.[processId]?.grade || 'not_started';
     const signedOff = !!data.signoffs[traineeId]?.[processId];
 
     switch (selectedStatus) {
@@ -72,7 +87,6 @@ export default function ProgressReport({ documents, users, currentUser }) {
     }
   }
 
-  // Filter processes that have at least one trainee matching the status filter
   const filteredProcessList = useMemo(() => {
     const list = [];
     for (const group of filteredGroups) {
@@ -96,9 +110,7 @@ export default function ProgressReport({ documents, users, currentUser }) {
     });
   }
 
-  function handlePrint() {
-    window.print();
-  }
+  function handlePrint() { window.print(); }
 
   if (documents.length === 0) {
     return (
@@ -111,7 +123,6 @@ export default function ProgressReport({ documents, users, currentUser }) {
 
   return (
     <div>
-      {/* Header - hidden in print */}
       <div className="print:hidden">
         <div className="flex items-center justify-between mb-4">
           <div>
@@ -125,59 +136,35 @@ export default function ProgressReport({ documents, users, currentUser }) {
                 showFilters ? 'bg-teal-50 text-teal-700 border-teal-200' : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'
               }`}
             >
-              <Filter className="w-4 h-4" />
-              Filters
+              <Filter className="w-4 h-4" />Filters
             </button>
-            <button
-              onClick={handlePrint}
-              className="flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium bg-white text-slate-600 border border-slate-200 hover:bg-slate-50 transition-colors"
-            >
-              <Printer className="w-4 h-4" />
-              Print
+            <button onClick={handlePrint} className="flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium bg-white text-slate-600 border border-slate-200 hover:bg-slate-50 transition-colors">
+              <Printer className="w-4 h-4" />Print
             </button>
           </div>
         </div>
-
-        {/* Document selector */}
         <div className="flex gap-3 mb-4">
           <select
             value={selectedDocId}
             onChange={(e) => { setSelectedDocId(e.target.value); setSelectedGroupId('all'); }}
             className="px-3 py-2 border border-slate-200 rounded-lg text-sm bg-white focus:outline-none focus:ring-2 focus:ring-teal-500"
           >
-            {documents.map((doc) => (
-              <option key={doc.id} value={doc.id}>{doc.title}</option>
-            ))}
+            {documents.map((doc) => <option key={doc.id} value={doc.id}>{doc.title}</option>)}
           </select>
         </div>
-
-        {/* Filters panel */}
         {showFilters && (
           <div className="bg-white rounded-lg border border-slate-200 p-4 mb-4 space-y-3">
             <div className="grid gap-3 sm:grid-cols-3">
-              {/* Group filter */}
               <div>
                 <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1">Group</label>
-                <select
-                  value={selectedGroupId}
-                  onChange={(e) => setSelectedGroupId(e.target.value)}
-                  className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm bg-white focus:outline-none focus:ring-2 focus:ring-teal-500"
-                >
+                <select value={selectedGroupId} onChange={(e) => setSelectedGroupId(e.target.value)} className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm bg-white focus:outline-none focus:ring-2 focus:ring-teal-500">
                   <option value="all">All Groups</option>
-                  {groups.map((g) => (
-                    <option key={g.id} value={g.id}>{g.title}</option>
-                  ))}
+                  {groups.map((g) => <option key={g.id} value={g.id}>{g.title}</option>)}
                 </select>
               </div>
-
-              {/* Status filter */}
               <div>
                 <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1">Status</label>
-                <select
-                  value={selectedStatus}
-                  onChange={(e) => setSelectedStatus(e.target.value)}
-                  className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm bg-white focus:outline-none focus:ring-2 focus:ring-teal-500"
-                >
+                <select value={selectedStatus} onChange={(e) => setSelectedStatus(e.target.value)} className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm bg-white focus:outline-none focus:ring-2 focus:ring-teal-500">
                   <option value="all">All Statuses</option>
                   <option value="not_started">Not Started</option>
                   <option value="in_progress">In Progress</option>
@@ -186,8 +173,6 @@ export default function ProgressReport({ documents, users, currentUser }) {
                 </select>
               </div>
             </div>
-
-            {/* Trainee filter */}
             <div>
               <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1">Trainees</label>
               <div className="flex flex-wrap gap-2">
@@ -196,33 +181,22 @@ export default function ProgressReport({ documents, users, currentUser }) {
                     key={t.id}
                     onClick={() => toggleTrainee(t.id)}
                     className={`px-3 py-1.5 rounded-full text-xs font-medium transition-colors border ${
-                      selectedTraineeIds.has(t.id)
-                        ? 'bg-teal-50 text-teal-700 border-teal-200'
-                        : 'bg-slate-50 text-slate-400 border-slate-200'
+                      selectedTraineeIds.has(t.id) ? 'bg-teal-50 text-teal-700 border-teal-200' : 'bg-slate-50 text-slate-400 border-slate-200'
                     }`}
-                  >
-                    {t.name}
-                  </button>
+                  >{t.name}</button>
                 ))}
-                <button
-                  onClick={() => setSelectedTraineeIds(new Set(trainees.map((t) => t.id)))}
-                  className="px-3 py-1.5 rounded-full text-xs font-medium text-slate-500 hover:text-slate-700 border border-slate-200 transition-colors"
-                >
-                  Select All
-                </button>
+                <button onClick={() => setSelectedTraineeIds(new Set(trainees.map((t) => t.id)))} className="px-3 py-1.5 rounded-full text-xs font-medium text-slate-500 hover:text-slate-700 border border-slate-200 transition-colors">Select All</button>
               </div>
             </div>
           </div>
         )}
       </div>
 
-      {/* Print header */}
       <div className="hidden print:block mb-4">
         <h1 className="text-xl font-bold">Progress Report — {selectedDoc?.title}</h1>
         <p className="text-sm text-gray-500">Printed {new Date().toLocaleDateString()}</p>
       </div>
 
-      {/* Table */}
       {visibleTrainees.length === 0 ? (
         <div className="text-center py-12 bg-white rounded-lg border border-slate-200">
           <p className="text-slate-500">No trainees selected. Use filters to show trainees.</p>
@@ -236,9 +210,7 @@ export default function ProgressReport({ documents, users, currentUser }) {
           <table className="w-full text-sm border-collapse">
             <thead>
               <tr className="border-b border-slate-200">
-                <th className="text-left p-3 font-semibold text-slate-600 sticky left-0 bg-white z-10 min-w-[250px]">
-                  Process
-                </th>
+                <th className="text-left p-3 font-semibold text-slate-600 sticky left-0 bg-white z-10 min-w-[250px]">Process</th>
                 {visibleTrainees.map((t) => (
                   <th key={t.id} className="text-center p-3 font-semibold text-slate-600 min-w-[100px]">
                     <span className="block truncate max-w-[100px]">{t.name}</span>
@@ -249,26 +221,18 @@ export default function ProgressReport({ documents, users, currentUser }) {
             <tbody>
               {filteredProcessList.map(({ group, processes }) => (
                 <>
-                  {/* Group header row */}
                   <tr key={`group-${group.id}`} className="bg-slate-50">
-                    <td
-                      colSpan={visibleTrainees.length + 1}
-                      className="p-2.5 font-semibold text-slate-700 text-xs uppercase tracking-wide"
-                    >
-                      {group.title}
-                    </td>
+                    <td colSpan={visibleTrainees.length + 1} className="p-2.5 font-semibold text-slate-700 text-xs uppercase tracking-wide">{group.title}</td>
                   </tr>
-                  {/* Process rows */}
                   {processes.map((proc) => (
                     <tr key={proc.id} className="border-b border-slate-100 hover:bg-slate-50/50">
                       <td className="p-2.5 text-slate-700 sticky left-0 bg-white text-xs leading-relaxed">
                         <span className="line-clamp-2">{proc.description}</span>
                       </td>
                       {visibleTrainees.map((t) => {
-                        const grade = data.progress[t.id]?.processes?.[proc.id]?.grade || 'not_started';
+                        const grade = data.progress[t.id]?.[proc.id]?.grade || 'not_started';
                         const gradeInfo = getGrade(grade);
                         const signedOff = !!data.signoffs[t.id]?.[proc.id];
-
                         return (
                           <td key={t.id} className="p-2 text-center">
                             <GradeCell grade={gradeInfo} signedOff={signedOff} />
@@ -284,7 +248,6 @@ export default function ProgressReport({ documents, users, currentUser }) {
         </div>
       )}
 
-      {/* Legend */}
       <div className="mt-4 flex flex-wrap gap-3 items-center print:mt-2">
         <span className="text-xs font-medium text-slate-500">Legend:</span>
         {GRADES.map((g) => (
@@ -312,17 +275,9 @@ function GradeCell({ grade, signedOff }) {
       </span>
     );
   }
-
   return (
-    <span
-      className={`inline-flex items-center justify-center w-8 h-8 rounded-lg ${grade.bgClass} border`}
-      style={{ borderColor: grade.color + '40' }}
-      title={grade.label}
-    >
-      <span
-        className="w-3 h-3 rounded-full"
-        style={{ backgroundColor: grade.color }}
-      />
+    <span className={`inline-flex items-center justify-center w-8 h-8 rounded-lg ${grade.bgClass} border`} style={{ borderColor: grade.color + '40' }} title={grade.label}>
+      <span className="w-3 h-3 rounded-full" style={{ backgroundColor: grade.color }} />
     </span>
   );
 }

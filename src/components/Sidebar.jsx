@@ -98,7 +98,7 @@ export default function Sidebar({ currentUser, currentView, onNavigate, onLogout
           className="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium text-slate-400 hover:bg-slate-700 hover:text-white transition-colors"
         >
           <LogOut className="w-5 h-5" />
-          Switch User
+          Sign Out
         </button>
       </div>
     </>

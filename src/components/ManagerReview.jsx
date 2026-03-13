@@ -4,7 +4,6 @@ import {
   ChevronRight,
   FileText,
   StickyNote,
-  Paperclip,
   Clock,
   ArrowLeft,
   User,
@@ -12,9 +11,15 @@ import {
   XCircle,
   Shield,
   Award,
-  MessageSquare,
 } from 'lucide-react';
-import storage from '../utils/storage';
+import {
+  fetchProgressForDoc,
+  fetchSignoffsForDoc,
+  progressArrayToMap,
+  signoffArrayToMap,
+  createSignoff,
+  revokeSignoff,
+} from '../lib/api';
 import { GRADES, getGrade, isCompleted } from '../utils/grades';
 import Attachments, { AttachmentCountBadge } from './Attachments';
 import { useToast } from './Toast';
@@ -87,37 +92,37 @@ export default function ManagerReview({ documents, users, currentUser }) {
 }
 
 function TraineeDocCard({ doc, traineeId, onClick }) {
-  const [progress, setProgress] = useState(null);
-  const [signoffs, setSignoffs] = useState(null);
+  const [progressMap, setProgressMap] = useState({});
+  const [signoffMap, setSignoffMap] = useState({});
 
   useEffect(() => {
-    setProgress(storage.get(`progress:${doc.id}:${traineeId}`));
-    setSignoffs(storage.get(`signoffs:${doc.id}:${traineeId}`));
+    let cancelled = false;
+    async function load() {
+      const [pRows, sRows] = await Promise.all([
+        fetchProgressForDoc(doc.id, traineeId),
+        fetchSignoffsForDoc(doc.id, traineeId),
+      ]);
+      if (cancelled) return;
+      setProgressMap(progressArrayToMap(pRows));
+      setSignoffMap(signoffArrayToMap(sRows));
+    }
+    load();
+    return () => { cancelled = true; };
   }, [doc.id, traineeId]);
 
   const totalProcesses = (doc.groups || []).reduce((sum, g) => sum + (g.processes?.length || 0), 0);
   let completedCount = 0;
   let signedOffCount = 0;
 
-  const signoffMap = {};
-  if (signoffs) {
-    for (const s of signoffs) {
-      if (!s.revokedAt) signoffMap[s.processId] = s;
-    }
-  }
-
-  if (progress?.processes) {
-    for (const g of doc.groups || []) {
-      for (const p of g.processes || []) {
-        const pg = progress.processes[p.id];
-        if (pg && isCompleted(pg.grade)) completedCount++;
-        if (signoffMap[p.id]) signedOffCount++;
-      }
+  for (const g of doc.groups || []) {
+    for (const p of g.processes || []) {
+      const pg = progressMap[p.id];
+      if (pg && isCompleted(pg.grade)) completedCount++;
+      if (signoffMap[p.id]) signedOffCount++;
     }
   }
 
   const pct = totalProcesses > 0 ? Math.round((completedCount / totalProcesses) * 100) : 0;
-  const signoffPct = totalProcesses > 0 ? Math.round((signedOffCount / totalProcesses) * 100) : 0;
 
   return (
     <button
@@ -142,80 +147,80 @@ function TraineeDocCard({ doc, traineeId, onClick }) {
   );
 }
 
-/**
- * Full review detail — manager views trainee progress and can sign off
- */
 function ReviewDetail({ doc, trainee, currentUser, onBack }) {
-  const [progress, setProgress] = useState({ processes: {} });
+  const [progressMap, setProgressMap] = useState({});
   const [signoffs, setSignoffs] = useState([]);
+  const [signoffMap, setSignoffMap] = useState({});
   const [expandedGroups, setExpandedGroups] = useState(new Set());
   const [expandedProcess, setExpandedProcess] = useState(null);
   const [loading, setLoading] = useState(true);
   const toast = useToast();
 
-  const signoffKey = `signoffs:${doc.id}:${trainee.id}`;
-
   useEffect(() => {
-    const storedProgress = storage.get(`progress:${doc.id}:${trainee.id}`);
-    const storedSignoffs = storage.get(signoffKey);
-    if (storedProgress) setProgress(storedProgress);
-    if (storedSignoffs) setSignoffs(storedSignoffs);
-    setExpandedGroups(new Set((doc.groups || []).map((g) => g.id)));
-    setLoading(false);
-  }, [doc.id, trainee.id, signoffKey]);
+    let cancelled = false;
+    async function load() {
+      const [pRows, sRows] = await Promise.all([
+        fetchProgressForDoc(doc.id, trainee.id),
+        fetchSignoffsForDoc(doc.id, trainee.id),
+      ]);
+      if (cancelled) return;
+      setProgressMap(progressArrayToMap(pRows));
+      setSignoffs(sRows);
+      setSignoffMap(signoffArrayToMap(sRows));
+      setExpandedGroups(new Set((doc.groups || []).map((g) => g.id)));
+      setLoading(false);
+    }
+    load();
+    return () => { cancelled = true; };
+  }, [doc.id, trainee.id]);
 
-  // Build active signoff map (latest non-revoked per process)
-  const signoffMap = {};
-  for (const s of signoffs) {
-    if (!s.revokedAt) {
-      signoffMap[s.processId] = s;
+  async function handleSignOff(processId, comment) {
+    try {
+      const record = await createSignoff(processId, trainee.id, doc.id, currentUser.id, comment);
+      const updated = [...signoffs, record];
+      setSignoffs(updated);
+      setSignoffMap(signoffArrayToMap(updated));
+      toast('Process signed off', 'success');
+    } catch (err) {
+      toast('Failed to sign off: ' + err.message, 'error');
     }
   }
 
-  const saveSignoffs = useCallback((updated) => {
-    setSignoffs(updated);
-    storage.set(signoffKey, updated);
-  }, [signoffKey]);
-
-  function handleSignOff(processId, comment) {
-    const record = {
-      processId,
-      managerId: currentUser.id,
-      managerName: currentUser.name,
-      signedOffAt: new Date().toISOString(),
-      comment: comment || undefined,
-    };
-    saveSignoffs([...signoffs, record]);
-    toast('Process signed off', 'success');
+  async function handleRevoke(processId, reason) {
+    const existing = signoffMap[processId];
+    if (!existing) return;
+    try {
+      await revokeSignoff(existing.id, reason);
+      const updated = signoffs.map((s) =>
+        s.id === existing.id ? { ...s, revoked_at: new Date().toISOString(), revoke_reason: reason || null } : s
+      );
+      setSignoffs(updated);
+      setSignoffMap(signoffArrayToMap(updated));
+      toast('Sign-off revoked', 'info');
+    } catch (err) {
+      toast('Failed to revoke: ' + err.message, 'error');
+    }
   }
 
-  function handleRevoke(processId, reason) {
-    const updated = signoffs.map((s) => {
-      if (s.processId === processId && !s.revokedAt) {
-        return { ...s, revokedAt: new Date().toISOString(), revokeReason: reason || undefined };
-      }
-      return s;
-    });
-    saveSignoffs(updated);
-    toast('Sign-off revoked', 'info');
-  }
-
-  function handleBulkSignOff(group) {
-    const newRecords = [];
+  async function handleBulkSignOff(group) {
+    const toSign = [];
     for (const proc of group.processes || []) {
-      const pg = progress.processes[proc.id];
+      const pg = progressMap[proc.id];
       if (pg && isCompleted(pg.grade) && !signoffMap[proc.id]) {
-        newRecords.push({
-          processId: proc.id,
-          managerId: currentUser.id,
-          managerName: currentUser.name,
-          signedOffAt: new Date().toISOString(),
-        });
+        toSign.push(proc.id);
       }
     }
-    if (newRecords.length > 0) {
-      saveSignoffs([...signoffs, ...newRecords]);
+    if (toSign.length === 0) return;
+    try {
+      const newRecords = await Promise.all(
+        toSign.map((processId) => createSignoff(processId, trainee.id, doc.id, currentUser.id))
+      );
+      const updated = [...signoffs, ...newRecords];
+      setSignoffs(updated);
+      setSignoffMap(signoffArrayToMap(updated));
       toast(`Signed off ${newRecords.length} processes`, 'success');
+    } catch (err) {
+      toast('Failed to bulk sign off: ' + err.message, 'error');
     }
   }
 
@@ -228,14 +233,13 @@ function ReviewDetail({ doc, trainee, currentUser, onBack }) {
     });
   }
 
-  // Overall stats
   const totalProcesses = (doc.groups || []).reduce((sum, g) => sum + (g.processes?.length || 0), 0);
   let overallCompleted = 0;
   let overallSignedOff = 0;
 
   for (const g of doc.groups || []) {
     for (const p of g.processes || []) {
-      const pg = progress.processes[p.id];
+      const pg = progressMap[p.id];
       if (pg && isCompleted(pg.grade)) overallCompleted++;
       if (signoffMap[p.id]) overallSignedOff++;
     }
@@ -248,12 +252,8 @@ function ReviewDetail({ doc, trainee, currentUser, onBack }) {
 
   return (
     <div>
-      {/* Header */}
       <div className="flex items-center gap-3 mb-4">
-        <button
-          onClick={onBack}
-          className="p-2 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-lg transition-colors"
-        >
+        <button onClick={onBack} className="p-2 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-lg transition-colors">
           <ArrowLeft className="w-5 h-5" />
         </button>
         <div className="flex-1">
@@ -265,7 +265,6 @@ function ReviewDetail({ doc, trainee, currentUser, onBack }) {
         </div>
       </div>
 
-      {/* Stats bar */}
       <div className="bg-white rounded-lg border border-slate-200 p-4 mb-6">
         <div className="grid grid-cols-2 gap-4">
           <div>
@@ -295,7 +294,6 @@ function ReviewDetail({ doc, trainee, currentUser, onBack }) {
         </div>
       </div>
 
-      {/* Groups */}
       <div className="space-y-3">
         {(doc.groups || []).map((group) => {
           const isExpanded = expandedGroups.has(group.id);
@@ -305,7 +303,7 @@ function ReviewDetail({ doc, trainee, currentUser, onBack }) {
           let groupEligible = 0;
 
           for (const p of group.processes || []) {
-            const pg = progress.processes[p.id];
+            const pg = progressMap[p.id];
             if (pg && isCompleted(pg.grade)) {
               groupCompleted++;
               if (!signoffMap[p.id]) groupEligible++;
@@ -315,26 +313,19 @@ function ReviewDetail({ doc, trainee, currentUser, onBack }) {
 
           return (
             <div key={group.id} className="bg-white rounded-lg border border-slate-200 overflow-hidden">
-              {/* Group header */}
               <div className="flex items-center gap-3 p-4 hover:bg-slate-50 transition-colors">
                 <button onClick={() => toggleGroup(group.id)} className="flex items-center gap-3 flex-1 text-left">
-                  {isExpanded ? (
-                    <ChevronDown className="w-5 h-5 text-slate-400 shrink-0" />
-                  ) : (
-                    <ChevronRight className="w-5 h-5 text-slate-400 shrink-0" />
-                  )}
+                  {isExpanded ? <ChevronDown className="w-5 h-5 text-slate-400 shrink-0" /> : <ChevronRight className="w-5 h-5 text-slate-400 shrink-0" />}
                   <div className="flex-1 min-w-0">
                     <div className="font-semibold text-slate-700">{group.title}</div>
                     <div className="text-xs text-slate-400 mt-0.5 flex gap-3">
                       <span>{groupCompleted}/{groupTotal} self-assessed</span>
                       <span className="flex items-center gap-1">
-                        <Award className="w-3 h-3 text-purple-500" />
-                        {groupSignedOff}/{groupTotal} signed off
+                        <Award className="w-3 h-3 text-purple-500" />{groupSignedOff}/{groupTotal} signed off
                       </span>
                     </div>
                   </div>
                 </button>
-                {/* Bulk sign-off button */}
                 {groupEligible > 0 && (
                   <button
                     onClick={() => handleBulkSignOff(group)}
@@ -345,15 +336,13 @@ function ReviewDetail({ doc, trainee, currentUser, onBack }) {
                   </button>
                 )}
               </div>
-
-              {/* Process list */}
               {isExpanded && (
                 <div className="border-t border-slate-100">
                   {(group.processes || []).map((proc) => (
                     <ReviewProcessCard
                       key={proc.id}
                       process={proc}
-                      progress={progress.processes[proc.id]}
+                      progress={progressMap[proc.id]}
                       signoff={signoffMap[proc.id]}
                       isExpanded={expandedProcess === proc.id}
                       onToggle={() => setExpandedProcess((prev) => (prev === proc.id ? null : proc.id))}
@@ -388,25 +377,17 @@ function ReviewProcessCard({ process, progress, signoff, isExpanded, onToggle, o
         </div>
         <div className="flex items-center gap-2 shrink-0">
           {notes && <StickyNote className="w-3.5 h-3.5 text-slate-400" />}
-          <AttachmentCountBadge docId={docId} processId={process.id} />
+          <AttachmentCountBadge processId={process.id} />
           {signoff ? (
             <span className="flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold bg-purple-50 text-purple-700">
-              <Award className="w-3 h-3" />
-              Signed Off
+              <Award className="w-3 h-3" />Signed Off
             </span>
           ) : (
-            <span className={`px-2 py-0.5 rounded-full text-xs font-semibold ${grade.bgClass} ${grade.textClass}`}>
-              {grade.shortLabel}
-            </span>
+            <span className={`px-2 py-0.5 rounded-full text-xs font-semibold ${grade.bgClass} ${grade.textClass}`}>{grade.shortLabel}</span>
           )}
-          {isExpanded ? (
-            <ChevronDown className="w-4 h-4 text-slate-400" />
-          ) : (
-            <ChevronRight className="w-4 h-4 text-slate-400" />
-          )}
+          {isExpanded ? <ChevronDown className="w-4 h-4 text-slate-400" /> : <ChevronRight className="w-4 h-4 text-slate-400" />}
         </div>
       </button>
-
       {isExpanded && (
         <ReviewProcessDetail
           process={process}
@@ -430,14 +411,13 @@ function ReviewProcessDetail({ process, progress, signoff, canSignOff, onSignOff
 
   return (
     <div className="px-4 pb-4 bg-slate-50/50 border-t border-slate-100">
-      {/* Process description */}
       <div className="py-3 mb-3 border-b border-slate-100">
         <p className="text-sm text-slate-700 leading-relaxed">{process.description}</p>
-        {process.bulletPoints?.length > 0 && (
+        {process.bullet_points?.length > 0 && (
           <div className="mt-3 pl-1">
             <p className="text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1.5">What Good Looks Like</p>
             <ul className="space-y-1">
-              {process.bulletPoints.map((bp, i) => (
+              {process.bullet_points.map((bp, i) => (
                 <li key={i} className="flex items-start gap-2">
                   <span className="text-teal-500 mt-0.5 shrink-0 text-xs">&bull;</span>
                   <span className="text-sm text-slate-600 leading-relaxed">{bp}</span>
@@ -448,40 +428,25 @@ function ReviewProcessDetail({ process, progress, signoff, canSignOff, onSignOff
         )}
       </div>
 
-      {/* Trainee's self-assessment (read-only) */}
       <div className="mb-4">
-        <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1">
-          Trainee's Self-Assessment
-        </label>
+        <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1">Trainee's Self-Assessment</label>
         <span className={`inline-block px-3 py-1.5 rounded-lg text-sm font-medium ${grade.bgClass} ${grade.textClass}`}>
           {grade.label}
           {grade.description && <span className="text-xs opacity-70 ml-1">— {grade.description}</span>}
         </span>
       </div>
 
-      {/* Trainee's notes (read-only) */}
       {progress?.notes && (
         <div className="mb-4">
-          <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1">
-            Trainee's Notes
-          </label>
-          <div className="bg-white border border-slate-200 rounded-lg px-3 py-2 text-sm text-slate-700 whitespace-pre-wrap">
-            {progress.notes}
-          </div>
+          <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1">Trainee's Notes</label>
+          <div className="bg-white border border-slate-200 rounded-lg px-3 py-2 text-sm text-slate-700 whitespace-pre-wrap">{progress.notes}</div>
         </div>
       )}
 
-      {/* Reference materials (read-only) */}
       <div className="mb-4">
-        <Attachments
-          docId={docId}
-          processId={process.id}
-          uploaderName=""
-          readOnly
-        />
+        <Attachments processId={process.id} documentId={docId} readOnly />
       </div>
 
-      {/* Sign-off section */}
       {signoff ? (
         <div className="bg-purple-50 border border-purple-200 rounded-lg p-3">
           <div className="flex items-center gap-2 mb-2">
@@ -489,11 +454,10 @@ function ReviewProcessDetail({ process, progress, signoff, canSignOff, onSignOff
             <span className="text-sm font-semibold text-purple-700">Signed Off</span>
           </div>
           <div className="text-xs text-purple-600 space-y-0.5">
-            <div>By: {signoff.managerName}</div>
-            <div>Date: {new Date(signoff.signedOffAt).toLocaleString()}</div>
+            <div>By: {signoff.manager?.name || 'Manager'}</div>
+            <div>Date: {new Date(signoff.signed_off_at).toLocaleString()}</div>
             {signoff.comment && <div className="mt-1 italic">"{signoff.comment}"</div>}
           </div>
-          {/* Revoke */}
           {showRevoke ? (
             <div className="mt-3 pt-3 border-t border-purple-200">
               <label className="block text-xs font-medium text-purple-600 mb-1">Reason for revoking (optional)</label>
@@ -505,27 +469,13 @@ function ReviewProcessDetail({ process, progress, signoff, canSignOff, onSignOff
                 className="w-full px-2 py-1.5 border border-purple-300 rounded text-sm focus:outline-none focus:ring-2 focus:ring-purple-500 mb-2"
               />
               <div className="flex gap-2">
-                <button
-                  onClick={() => { onRevoke(revokeReason); setShowRevoke(false); setRevokeReason(''); }}
-                  className="px-3 py-1.5 bg-red-500 text-white rounded text-xs hover:bg-red-600"
-                >
-                  Revoke Sign-Off
-                </button>
-                <button
-                  onClick={() => { setShowRevoke(false); setRevokeReason(''); }}
-                  className="px-3 py-1.5 border border-purple-300 text-purple-600 rounded text-xs hover:bg-purple-100"
-                >
-                  Cancel
-                </button>
+                <button onClick={() => { onRevoke(revokeReason); setShowRevoke(false); setRevokeReason(''); }} className="px-3 py-1.5 bg-red-500 text-white rounded text-xs hover:bg-red-600">Revoke Sign-Off</button>
+                <button onClick={() => { setShowRevoke(false); setRevokeReason(''); }} className="px-3 py-1.5 border border-purple-300 text-purple-600 rounded text-xs hover:bg-purple-100">Cancel</button>
               </div>
             </div>
           ) : (
-            <button
-              onClick={() => setShowRevoke(true)}
-              className="mt-2 flex items-center gap-1 text-xs text-purple-500 hover:text-purple-700"
-            >
-              <XCircle className="w-3 h-3" />
-              Revoke sign-off
+            <button onClick={() => setShowRevoke(true)} className="mt-2 flex items-center gap-1 text-xs text-purple-500 hover:text-purple-700">
+              <XCircle className="w-3 h-3" />Revoke sign-off
             </button>
           )}
         </div>
@@ -548,8 +498,7 @@ function ReviewProcessDetail({ process, progress, signoff, canSignOff, onSignOff
             onClick={() => { onSignOff(signoffComment); setSignoffComment(''); }}
             className="flex items-center gap-1.5 px-4 py-2 bg-purple-600 text-white rounded-lg text-sm font-medium hover:bg-purple-700 transition-colors"
           >
-            <Award className="w-4 h-4" />
-            Sign Off This Process
+            <Award className="w-4 h-4" />Sign Off This Process
           </button>
         </div>
       ) : (
@@ -565,11 +514,10 @@ function ReviewProcessDetail({ process, progress, signoff, canSignOff, onSignOff
         </div>
       )}
 
-      {/* Last updated */}
-      {progress?.lastUpdated && (
+      {progress?.updated_at && (
         <div className="flex items-center gap-1.5 text-xs text-slate-400 mt-3">
           <Clock className="w-3 h-3" />
-          Last updated by trainee: {new Date(progress.lastUpdated).toLocaleString()}
+          Last updated by trainee: {new Date(progress.updated_at).toLocaleString()}
         </div>
       )}
     </div>

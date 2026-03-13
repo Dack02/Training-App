@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
-import storage from './utils/storage';
-import { createFOHDocument } from './utils/seedData';
+import { useAuth } from './contexts/AuthContext';
+import { fetchAllDocumentsWithChildren, fetchProfiles } from './lib/api';
+import { signOut } from './lib/auth';
 import LoginScreen from './components/LoginScreen';
 import Sidebar from './components/Sidebar';
 import Breadcrumb from './components/Breadcrumb';
@@ -15,91 +16,67 @@ import Settings from './components/Settings';
 import { ToastProvider } from './components/Toast';
 
 export default function App() {
-  const [users, setUsers] = useState([]);
-  const [currentUserId, setCurrentUserId] = useState(null);
+  const { user, profile, loading: authLoading } = useAuth();
   const [currentView, setCurrentView] = useState('dashboard');
   const [documents, setDocuments] = useState([]);
+  const [users, setUsers] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
 
-  // Load initial data + seed FOH document on first run
-  useEffect(() => {
+  const loadData = useCallback(async () => {
     try {
-      const storedUsers = storage.get('users') || [];
-      const storedCurrentUser = storage.get('current-user', { shared: false });
-      setUsers(storedUsers);
-      if (storedCurrentUser && storedUsers.some((u) => u.id === storedCurrentUser)) {
-        setCurrentUserId(storedCurrentUser);
-      }
-
-      // Load documents
-      let storedDocs = storage.get('documents');
-      if (storedDocs === null) {
-        // First run — seed the FOH Basic Tasks document
-        const fohDoc = createFOHDocument();
-        storedDocs = [{ id: fohDoc.id, title: fohDoc.title, createdAt: fohDoc.createdAt, groups: fohDoc.groups }];
-        storage.set('documents', storedDocs);
-        storage.set(`doc:${fohDoc.id}`, fohDoc);
-      }
-      setDocuments(storedDocs);
+      setLoading(true);
+      setError(null);
+      const [docs, profiles] = await Promise.all([
+        fetchAllDocumentsWithChildren(),
+        fetchProfiles(),
+      ]);
+      setDocuments(docs);
+      setUsers(profiles);
     } catch (err) {
-      setError('Failed to load app data. Please try refreshing the page.');
+      setError('Failed to load app data: ' + err.message);
     } finally {
       setLoading(false);
     }
   }, []);
 
-  const currentUser = users.find((u) => u.id === currentUserId) || null;
+  useEffect(() => {
+    if (user) {
+      loadData();
+    } else {
+      setLoading(false);
+    }
+  }, [user, loadData]);
 
-  const handleCreateUser = useCallback(
-    (newUser) => {
-      const updated = [...users, newUser];
-      storage.set('users', updated);
-      setUsers(updated);
-    },
-    [users]
-  );
-
-  const handleLogin = useCallback((userId) => {
-    storage.set('current-user', userId, { shared: false });
-    setCurrentUserId(userId);
+  const handleLogout = useCallback(async () => {
+    await signOut();
     setCurrentView('dashboard');
   }, []);
 
-  const handleLogout = useCallback(() => {
-    storage.delete('current-user', { shared: false });
-    setCurrentUserId(null);
-    setCurrentView('dashboard');
-  }, []);
-
-  const handleSaveDocuments = useCallback((docs) => {
-    storage.set('documents', docs);
-    setDocuments(docs);
-  }, []);
-
-  const handleSaveDoc = useCallback((doc) => {
-    storage.set(`doc:${doc.id}`, doc);
-    // Also update the documents list with the latest group info
-    setDocuments((prev) => {
-      const updated = prev.map((d) =>
-        d.id === doc.id ? { ...d, title: doc.title, groups: doc.groups } : d
-      );
-      // If it's a new doc not yet in the list, add it
-      if (!updated.some((d) => d.id === doc.id)) {
-        updated.push({ id: doc.id, title: doc.title, createdAt: doc.createdAt, groups: doc.groups });
-      }
-      storage.set('documents', updated);
-      return updated;
-    });
-  }, []);
-
-  // Loading state
-  if (loading) {
+  // Auth still loading
+  if (authLoading) {
     return (
       <div className="min-h-screen bg-slate-50 flex items-center justify-center">
         <div className="text-center">
           <div className="w-8 h-8 border-3 border-teal-600 border-t-transparent rounded-full animate-spin mx-auto mb-3" />
           <p className="text-slate-500">Loading...</p>
+        </div>
+      </div>
+    );
+  }
+
+  // Not signed in
+  if (!user || !profile) {
+    return <LoginScreen />;
+  }
+
+  // Data loading
+  if (loading) {
+    return (
+      <div className="min-h-screen bg-slate-50 flex items-center justify-center">
+        <div className="text-center">
+          <div className="w-8 h-8 border-3 border-teal-600 border-t-transparent rounded-full animate-spin mx-auto mb-3" />
+          <p className="text-slate-500">Loading data...</p>
         </div>
       </div>
     );
@@ -114,28 +91,23 @@ export default function App() {
           <h2 className="text-xl font-semibold text-slate-800 mb-2">Something went wrong</h2>
           <p className="text-slate-500 mb-6">{error}</p>
           <button
-            onClick={() => window.location.reload()}
+            onClick={loadData}
             className="px-6 py-2.5 bg-teal-600 text-white rounded-lg hover:bg-teal-700 transition-colors"
           >
-            Refresh Page
+            Retry
           </button>
         </div>
       </div>
     );
   }
 
-  // Login screen
-  if (!currentUser) {
-    return (
-      <LoginScreen
-        users={users}
-        onLogin={handleLogin}
-        onCreateUser={handleCreateUser}
-      />
-    );
-  }
+  // Build currentUser shape for compatibility with components
+  const currentUser = {
+    id: profile.id,
+    name: profile.name,
+    role: profile.role,
+  };
 
-  // Main app with sidebar
   return (
     <ToastProvider>
       <div className="flex min-h-screen bg-slate-50">
@@ -152,11 +124,9 @@ export default function App() {
               currentView={currentView}
               currentUser={currentUser}
               documents={documents}
-              onSaveDocuments={handleSaveDocuments}
-              onSaveDoc={handleSaveDoc}
               users={users}
-              onSaveUsers={(updated) => { storage.set('users', updated); setUsers(updated); }}
               onNavigate={setCurrentView}
+              onDataChange={loadData}
             />
           </div>
         </main>
@@ -165,7 +135,7 @@ export default function App() {
   );
 }
 
-function MainContent({ currentView, currentUser, documents, onSaveDocuments, onSaveDoc, users, onSaveUsers, onNavigate }) {
+function MainContent({ currentView, currentUser, documents, users, onNavigate, onDataChange }) {
   switch (currentView) {
     case 'dashboard':
       return (
@@ -203,9 +173,8 @@ function MainContent({ currentView, currentUser, documents, onSaveDocuments, onS
       return (
         <ManageDocuments
           documents={documents}
-          onSaveDocuments={onSaveDocuments}
-          onSaveDoc={onSaveDoc}
           currentUser={currentUser}
+          onDataChange={onDataChange}
         />
       );
     case 'manage-users':
@@ -213,7 +182,7 @@ function MainContent({ currentView, currentUser, documents, onSaveDocuments, onS
         <ManageUsers
           users={users}
           currentUser={currentUser}
-          onSaveUsers={onSaveUsers}
+          onDataChange={onDataChange}
         />
       );
     case 'settings':

@@ -25,24 +25,20 @@ export function AuthProvider({ children }) {
   useEffect(() => {
     let mounted = true;
 
-    async function init() {
-      try {
-        const session = await getSession();
-        if (!mounted) return;
-        setSession(session);
-        if (session?.user) {
-          const prof = await fetchProfile(session.user.id);
-          if (mounted) setProfile(prof);
-        }
-      } catch (err) {
-        console.error('Auth init error:', err.message);
-      } finally {
-        if (mounted) setLoading(false);
+    // Use getSession() for initial load (avoids Navigator Lock issues in StrictMode)
+    getSession().then(async (session) => {
+      if (!mounted) return;
+      setSession(session);
+      if (session?.user) {
+        const prof = await fetchProfile(session.user.id);
+        if (mounted) setProfile(prof);
       }
-    }
+      if (mounted) setLoading(false);
+    }).catch(() => {
+      if (mounted) setLoading(false);
+    });
 
-    init();
-
+    // Listen for subsequent auth changes (sign-in, sign-out, token refresh)
     const subscription = onAuthStateChange(async (session) => {
       if (!mounted) return;
       setSession(session);

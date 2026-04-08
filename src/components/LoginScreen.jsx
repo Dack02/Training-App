@@ -36,7 +36,7 @@ export default function LoginScreen() {
     setLoading(true);
     try {
       await signUp({ email, password, name: name.trim(), role });
-      setSuccess('Account created! You can now sign in.');
+      setSuccess('Account created! Check your email and click the confirmation link, then sign in.');
       setMode('login');
       setPassword('');
     } catch (err) {

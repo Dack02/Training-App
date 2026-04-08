@@ -40,13 +40,15 @@ export default function App() {
     }
   }, []);
 
+  // Only load data on initial login, not on token refreshes
+  const userId = user?.id;
   useEffect(() => {
-    if (user) {
+    if (userId) {
       loadData();
     } else {
       setLoading(false);
     }
-  }, [user, loadData]);
+  }, [userId, loadData]);
 
   const handleLogout = useCallback(async () => {
     await signOut();
